@@ -1,136 +1,147 @@
 #!/usr/bin/env python3
 """
 ytmp4 — YouTube to MP4 Converter
-A sleek dark-themed GUI for downloading YouTube videos as MP4 files.
+Designed with intention. Every pixel matters.
 """
 
-import os, re, subprocess, shutil, threading, queue, shlex
+import os, re, subprocess, shutil, threading, queue
 from tkinter import *
 from tkinter import ttk, messagebox
+import math, time
 
-# ─── Auto-detect yt-dlp ──────────────────────────────────────
+# ─── Auto-detect yt-dlp ──────────────────────────────────
 YTLP = None
-for candidate in [
-    "/opt/homebrew/bin/yt-dlp",
-    "/usr/local/bin/yt-dlp",
-    "/usr/local/bin/yt-dlp",
-    shutil.which("yt-dlp"),
-]:
-    if candidate and os.path.isfile(candidate):
-        YTLP = candidate
-        break
-
+for c in ["/opt/homebrew/bin/yt-dlp", "/usr/local/bin/yt-dlp",
+           shutil.which("yt-dlp")]:
+    if c and os.path.isfile(c): YTLP = c; break
+    if c and os.path.isfile(c): YTLP = c; break
+    if c and os.path.isfile(c): YTLP = c; break
 if not YTLP:
-    # Last resort — try pip-installed location
-    for home in [os.path.expanduser("~")]:
-        p = os.path.join(home, "Library", "Python", "3.9", "bin", "yt-dlp")
-        if os.path.isfile(p):
-            YTLP = p
-            break
+    h = os.path.expanduser("~")
+    for p in [os.path.join(h,"Library","Python","3.9","bin","yt-dlp"),
+              os.path.join(h,"Library","Python","3.10","bin","yt-dlp")]:
+        if os.path.isfile(p): YTLP = p; break
 
 DESKTOP = os.path.expanduser("~/Desktop")
 
-# ─── Colour Palette ───────────────────────────────────────────
-C = {
-    "bg":         "#0a0a0a",
-    "surface":    "#141414",
-    "card":       "#1a1a1a",
-    "border":     "#2a2a2a",
-    "border_focus": "#00ff88",
-    "text":       "#f0f0f0",
-    "text_dim":   "#666666",
-    "accent":     "#00ff88",
-    "accent_dim": "#00cc6a",
-    "accent_bg":  "#00ff8815",
-    "error":      "#ff4466",
-    "success":    "#00ff88",
-    "log_text":   "#888888",
-    "list_bg":    "#121212",
-    "scroll_bg":  "#1a1a1a",
-    "scroll_fg":  "#333333",
-}
+# ─── Design Tokens ───────────────────────────────────────
+class T:
+    # Backgrounds
+    bg          = "#0b0b0b"
+    surface     = "#131313"
+    card        = "#181818"
+    card_hover  = "#1e1e1e"
+    border      = "#222222"
+    border_acc  = "#00ff88"
+    border_sub  = "#2a2a2a"
 
-FONT = "Helvetica Neue"
-FONT_MONO = "SF Mono"
+    # Text
+    text        = "#eeeeee"
+    text_dim    = "#666666"
+    text_muted  = "#444444"
+    text_inv    = "#0b0b0b"
+
+    # Accent
+    accent      = "#00ff88"
+    accent_dim  = "#00cc66"
+    accent_sub  = "#00ff8820"
+    accent_glow = "#00ff8820"
+
+    # Feedback
+    error       = "#ff3355"
+    error_bg    = "#ff335512"
+    success     = "#00ff88"
+    success_bg  = "#00ff8810"
+    warn        = "#ffaa00"
+
+    # Misc
+    scroll_track = "#181818"
+    scroll_thumb = "#333333"
+
+    # Sizing
+    radius = 8
+    radius_sm = 4
+    pad = 24
+    pad_sm = 12
+    pad_xs = 8
+
+
+class RoundedCanvas(Canvas):
+    """Canvas wrapper with anti-aliased rounded rect support."""
+
+    def __init__(self, parent, **kw):
+        super().__init__(parent, **kw)
+        self.config(highlightthickness=0, bd=0)
+
+    def rrect(self, x1, y1, x2, y2, r=T.radius, **kw):
+        points = []
+        for i in range(0, 360, 3):
+            t = math.radians(i)
+            if i < 90:
+                cx, cy = x2 - r, y1 + r
+            elif i < 180:
+                cx, cy = x2 - r, y2 - r
+            elif i < 270:
+                cx, cy = x1 + r, y2 - r
+            else:
+                cx, cy = x1 + r, y1 + r
+            points.append(cx + r * math.cos(t))
+            points.append(cy + r * math.sin(t))
+        return self.create_polygon(points, smooth=True, **kw)
 
 
 class Ytmp4Converter:
     def __init__(self, root):
         self.root = root
         self.root.title("")
-        self.root.geometry("720x700")
-        self.root.minsize(620, 580)
-        self.root.configure(bg=C["bg"])
+        self.root.geometry("760x760")
+        self.root.minsize(640, 660)
+        self.root.configure(bg=T.bg)
         self.root.overrideredirect(True)
 
         self.urls = []
         self.downloading = False
         self.log_q = queue.Queue()
         self.status_q = queue.Queue()
-        self._drag_data = {"x": 0, "y": 0}
+        self._drag = {"x": 0, "y": 0}
+        self._anim_frame = 0
+        self._hovered = set()
 
-        self._setup_styles()
-        self._build_ui()
-        self._poll_queues()
+        self._build()
+        self._poll()
 
-    # ── Styles ──────────────────────────────────────────────
-    def _setup_styles(self):
-        s = ttk.Style()
-        s.theme_use("clam")
-        s.configure(".", background=C["bg"], foreground=C["text"], font=(FONT, 11))
-
-        s.configure("Accent.TButton",
-            background=C["accent"], foreground=C["bg"],
-            font=(FONT, 13, "bold"), borderwidth=0, focusthickness=0,
-            padding=(20, 10))
-        s.map("Accent.TButton",
-            background=[("active", "#22ff99"), ("disabled", "#333")],
-            foreground=[("disabled", "#555")])
-
-        s.configure("Small.TButton",
-            background=C["card"], foreground=C["text_dim"],
-            font=(FONT, 10), borderwidth=0, focusthickness=0,
-            padding=(10, 5))
-        s.map("Small.TButton",
-            background=[("active", C["border"]), ("disabled", C["card"])],
-            foreground=[("active", C["text"]), ("disabled", "#444")])
-
-        s.configure("Dark.TEntry",
-            fieldbackground=C["card"], foreground=C["text"],
-            font=(FONT, 13), borderwidth=0, padding=(12, 8))
-
-        s.configure("Dark.Horizontal.TProgressbar",
-            background=C["accent"], troughcolor=C["card"],
-            borderwidth=0, thickness=4)
-
-        s.configure("Dark.Vertical.TScrollbar",
-            background=C["scroll_fg"], troughcolor=C["scroll_bg"],
-            borderwidth=0, width=8, arrowsize=0)
-
-    # ── Build UI ────────────────────────────────────────────
-    def _build_ui(self):
+    # ═══════════════════════════════════════════════════════
+    #  BUILD
+    # ═══════════════════════════════════════════════════════
+    def _build(self):
         self.root.columnconfigure(0, weight=1)
         self.root.rowconfigure(0, weight=1)
 
-        outer = Frame(self.root, bg=C["border"], padx=1, pady=1)
+        # Outer border glow
+        outer = Frame(self.root, bg=T.border_acc, padx=1, pady=1)
         outer.grid(row=0, column=0, sticky="nsew")
         outer.columnconfigure(0, weight=1)
         outer.rowconfigure(0, weight=1)
 
-        inner = Frame(outer, bg=C["bg"], padx=28, pady=24)
+        inner = Frame(outer, bg=T.bg, padx=0, pady=0)
         inner.grid(row=0, column=0, sticky="nsew")
         inner.columnconfigure(0, weight=1)
         inner.rowconfigure(2, weight=1)
 
-        # ── Title Bar ──
-        title_bar = Frame(inner, bg=C["bg"], height=36, cursor="fleur")
-        title_bar.grid(row=0, column=0, sticky="ew", pady=(0, 8))
-        title_bar.columnconfigure(1, weight=1)
-        title_bar.bind("<Button-1>", self._start_drag)
-        title_bar.bind("<B1-Motion>", self._drag)
+        # ─── TITLE BAR ─────────────────────────────────────
+        tb = Frame(inner, bg=T.surface, height=48, cursor="fleur")
+        tb.grid(row=0, column=0, sticky="ew")
+        tb.columnconfigure(1, weight=1)
+        tb.bind("<Button-1>", self._drag_start)
+        tb.bind("<B1-Motion>", self._drag_move)
 
-        dots = Frame(title_bar, bg=C["bg"])
-        dots.grid(row=0, column=0, padx=(0, 14))
+        # Accent line under title bar
+        acc_line = Frame(inner, bg=T.accent, height=1)
+        acc_line.grid(row=1, column=0, sticky="ew")
+
+        # Traffic lights
+        dots = Frame(tb, bg=T.surface)
+        dots.grid(row=0, column=0, padx=(16, 12))
         for color, cmd in [("#ff5f56", self._close), ("#ffbd2e", self._minimize),
                             ("#27c93f", self._maximize)]:
             d = Frame(dots, width=12, height=12, bg=color, highlightthickness=0)
@@ -138,214 +149,278 @@ class Ytmp4Converter:
             d.pack_propagate(False)
             d.bind("<Button-1>", lambda e, c=cmd: c())
 
-        title_frame = Frame(title_bar, bg=C["bg"])
-        title_frame.grid(row=0, column=1, sticky="w")
-        Label(title_frame, text="▶", fg=C["accent"], bg=C["bg"],
-              font=(FONT, 16, "bold")).pack(side=LEFT, padx=(0, 8))
-        Label(title_frame, text="ytmp4", fg=C["text"],
-              bg=C["bg"], font=(FONT, 14, "bold")).pack(side=LEFT)
+        # Logo + title
+        tf = Frame(tb, bg=T.surface)
+        tf.grid(row=0, column=1, sticky="w")
+        # Play icon
+        icon_c = RoundedCanvas(tf, width=28, height=28, bg=T.surface, bd=0)
+        icon_c.pack(side=LEFT, padx=(0, 10))
+        icon_c.rrect(2, 2, 26, 26, r=6, fill=T.accent_sub, outline="")
+        icon_c.create_polygon(9, 6, 9, 22, 23, 14,
+                              fill=T.accent, smooth=False)
 
-        # ── Input ──
-        input_card = Frame(inner, bg=C["card"], padx=14, pady=14)
-        input_card.grid(row=1, column=0, sticky="ew", pady=(0, 14))
-        input_card.columnconfigure(0, weight=1)
+        Label(tf, text="ytmp4", fg=T.text, bg=T.surface,
+              font=("Helvetica Neue", 15, "bold")).pack(side=LEFT)
+        Label(tf, text="converter", fg=T.text_dim, bg=T.surface,
+              font=("Helvetica Neue", 15)).pack(side=LEFT)
 
-        Label(input_card, text="YouTube URL", fg=C["text_dim"],
-              bg=C["card"], font=(FONT, 9, "bold"), anchor="w").grid(
-                  row=0, column=0, columnspan=2, sticky="ew", pady=(0, 6))
+        self.count_badge = Frame(tb, bg=T.accent, padx=6, pady=1)
+        self.count_badge.grid(row=0, column=2, padx=(0, 16))
+        self.count_lbl_tb = Label(self.count_badge, text="0", fg=T.text_inv,
+                                   bg=T.accent, font=("Helvetica Neue", 10, "bold"))
+        self.count_lbl_tb.pack()
+        self._show_count(0)
 
-        entry_row = Frame(input_card, bg=C["card"])
-        entry_row.grid(row=1, column=0, columnspan=2, sticky="ew")
-        entry_row.columnconfigure(0, weight=1)
+        # ─── CONTENT ──────────────────────────────────────
+        content = Frame(inner, bg=T.bg, padx=T.pad, pady=(T.pad, T.pad))
+        content.grid(row=2, column=0, sticky="nsew")
+        content.columnconfigure(0, weight=1)
+        content.rowconfigure(2, weight=1)
+
+        # ── SECTION: Input ──
+        self._build_input(content)
+
+        # ── SECTION: Queue ──
+        self._build_queue(content)
+
+        # ── SECTION: Bottom (progress + log) ──
+        self._build_bottom(content)
+
+    def _build_input(self, parent):
+        sec = Frame(parent, bg=T.bg)
+        sec.grid(row=0, column=0, sticky="ew", pady=(0, T.pad))
+        sec.columnconfigure(1, weight=1)
+
+        # Label
+        Label(sec, text="Add videos", fg=T.text_dim, bg=T.bg,
+              font=("Helvetica Neue", 9, "bold")).grid(
+                  row=0, column=0, columnspan=3, sticky="sw", pady=(0, 8))
+
+        # Search bar
+        entry_card = Frame(sec, bg=T.card,
+                           highlightbackground=T.border, highlightthickness=1,
+                           padx=14, pady=0)
+        entry_card.grid(row=1, column=0, columnspan=2, sticky="ew", padx=(0, 10))
+        entry_card.columnconfigure(0, weight=1)
 
         self.url_var = StringVar()
-        self.url_entry = ttk.Entry(entry_row, textvariable=self.url_var,
-                                    style="Dark.TEntry")
-        self.url_entry.grid(row=0, column=0, sticky="ew", padx=(0, 10))
-        self.url_entry.insert(0, "https://youtube.com/watch?v=...")
-        self.url_entry.config(foreground=C["text_dim"])
-        self.url_entry.bind("<FocusIn>", self._on_focus_in)
-        self.url_entry.bind("<FocusOut>", self._on_focus_out)
+        self.url_entry = Entry(entry_card, textvariable=self.url_var,
+                                bg=T.card, fg=T.text_dim, bd=0,
+                                font=("Helvetica Neue", 13),
+                                insertbackground=T.accent, relief="flat")
+        self.url_entry.grid(row=0, column=0, sticky="ew", ipady=10)
+        self.url_entry.insert(0, "Paste a YouTube link...")
+        self.url_entry.bind("<FocusIn>", self._in_focus)
+        self.url_entry.bind("<FocusOut>", self._in_blur)
         self.url_entry.bind("<Return>", lambda e: self._add_url())
 
-        add_btn = ttk.Button(entry_row, text="+  ADD", style="Accent.TButton",
-                              command=self._add_url)
-        add_btn.grid(row=0, column=2)
+        add_btn = RoundedCanvas(sec, width=100, height=40, bg=T.bg, bd=0)
+        add_btn.grid(row=1, column=2, sticky="e")
+        add_btn.rrect(0, 0, 100, 40, r=T.radius, fill=T.accent, tags="bg")
+        add_btn.create_text(50, 20, text="+ Add", fill=T.text_inv,
+                            font=("Helvetica Neue", 12, "bold"), tags="txt")
+        add_btn.bind("<Button-1>", lambda e: self._add_url())
+        add_btn.bind("<Enter>", lambda e: add_btn.itemconfig("bg",
+                      fill=T.accent_dim))
+        add_btn.bind("<Leave>", lambda e: add_btn.itemconfig("bg", fill=T.accent))
 
-        # ── URL List ──
-        list_card = Frame(inner, bg=C["card"], padx=14, pady=14)
-        list_card.grid(row=2, column=0, sticky="nsew", pady=(0, 14))
-        list_card.columnconfigure(0, weight=1)
-        list_card.rowconfigure(1, weight=1)
+        # Accent underline
+        Frame(sec, bg=T.accent_sub, height=1).grid(
+            row=2, column=0, columnspan=3, sticky="ew", pady=(6, 0))
 
-        list_hdr = Frame(list_card, bg=C["card"])
-        list_hdr.grid(row=0, column=0, sticky="ew", pady=(0, 8))
-        list_hdr.columnconfigure(0, weight=1)
+    def _build_queue(self, parent):
+        sec = Frame(parent, bg=T.bg)
+        sec.grid(row=2, column=0, sticky="nsew", pady=(0, T.pad))
+        sec.columnconfigure(0, weight=1)
+        sec.rowconfigure(1, weight=1)
 
-        self.count_lbl = Label(list_hdr, text="No URLs added", fg=C["text_dim"],
-                                bg=C["card"], font=(FONT, 9, "bold"))
-        self.count_lbl.grid(row=0, column=0, sticky="w")
+        # Header
+        hdr = Frame(sec, bg=T.bg)
+        hdr.grid(row=0, column=0, sticky="ew", pady=(0, 8))
+        hdr.columnconfigure(0, weight=1)
 
-        btn_r = Frame(list_hdr, bg=C["card"])
+        Label(hdr, text="Queue", fg=T.text_dim, bg=T.bg,
+              font=("Helvetica Neue", 9, "bold")).grid(row=0, column=0, sticky="w")
+
+        btn_r = Frame(hdr, bg=T.bg)
         btn_r.grid(row=0, column=1)
-        ttk.Button(btn_r, text="✕ Remove", style="Small.TButton",
-                    command=self._remove_selected).pack(side=LEFT, padx=(0, 4))
-        ttk.Button(btn_r, text="Clear All", style="Small.TButton",
-                    command=self._clear_urls).pack(side=LEFT)
+        self._mk_small_btn(btn_r, "✕ Remove", self._remove_selected).pack(
+            side=LEFT, padx=(0, 6))
+        self._mk_small_btn(btn_r, "Clear", self._clear_urls).pack(side=LEFT)
 
-        list_c = Frame(list_card, bg=C["list_bg"],
-                       highlightbackground=C["border"], highlightthickness=1)
-        list_c.grid(row=1, column=0, sticky="nsew")
-        list_c.columnconfigure(0, weight=1)
-        list_c.rowconfigure(0, weight=1)
+        self._mk_small_btn = None  # prevent gc
 
-        self.listbox = Listbox(list_c,
-            bg=C["list_bg"], fg=C["text"], selectbackground=C["accent_dim"],
-            selectforeground=C["bg"], font=(FONT, 11), borderwidth=0,
+        # List container
+        lc = Frame(sec, bg=T.card,
+                   highlightbackground=T.border, highlightthickness=1)
+        lc.grid(row=1, column=0, sticky="nsew")
+        lc.columnconfigure(0, weight=1)
+        lc.rowconfigure(0, weight=1)
+
+        self.listbox = Listbox(lc,
+            bg=T.card, fg=T.text, selectbackground=T.accent + "40",
+            selectforeground=T.text,
+            font=("Helvetica Neue", 12), borderwidth=0,
             highlightthickness=0, activestyle="none", relief="flat")
         self.listbox.grid(row=0, column=0, sticky="nsew")
 
-        sb = ttk.Scrollbar(list_c, orient="vertical", style="Dark.Vertical.TScrollbar",
-                            command=self.listbox.yview)
+        sb = Scrollbar(lc, orient="vertical", bg=T.scroll_track,
+                        troughcolor=T.scroll_track,
+                        activebackground=T.accent, bd=0, highlightthickness=0)
         sb.grid(row=0, column=1, sticky="ns")
         self.listbox.config(yscrollcommand=sb.set)
+        sb.config(command=self.listbox.yview)
 
-        # ── Bottom ──
-        bottom = Frame(inner, bg=C["bg"])
-        bottom.grid(row=3, column=0, sticky="ew")
-        bottom.columnconfigure(0, weight=1)
+    def _build_bottom(self, parent):
+        sec = Frame(parent, bg=T.bg)
+        sec.grid(row=3, column=0, sticky="ew")
+        sec.columnconfigure(0, weight=1)
 
-        self.progress_var = DoubleVar()
-        self.progress = ttk.Progressbar(bottom, variable=self.progress_var,
-                                         style="Dark.Horizontal.TProgressbar")
-        self.progress.grid(row=0, column=0, columnspan=3, sticky="ew", pady=(0, 12))
-        self.progress.grid_remove()
+        # Progress bar
+        prog_c = RoundedCanvas(sec, height=4, bg=T.bg, bd=0)
+        prog_c.grid(row=0, column=0, columnspan=3, sticky="ew", pady=(0, 14))
+        prog_c.rrect(0, 0, 760, 4, r=2, fill=T.card, tags="track")
+        prog_c.rrect(0, 0, 0, 4, r=2, fill=T.accent, tags="bar")
+        prog_c.itemconfig("track", state="hidden")
+        prog_c.itemconfig("bar", state="hidden")
+        self.prog_c = prog_c
+        self.prog_width = 0
 
-        status_row = Frame(bottom, bg=C["bg"])
-        status_row.grid(row=1, column=0, columnspan=3, sticky="ew", pady=(0, 8))
-        status_row.columnconfigure(0, weight=1)
+        # Status row
+        sr = Frame(sec, bg=T.bg)
+        sr.grid(row=1, column=0, columnspan=3, sticky="ew", pady=(0, T.pad_sm))
+        sr.columnconfigure(0, weight=1)
 
-        self.status_lbl = Label(status_row, text="Ready", fg=C["text_dim"],
-                                 bg=C["bg"], font=(FONT, 10))
+        self.status_lbl = Label(sr, text="Ready", fg=T.text_muted,
+                                 bg=T.bg, font=("Helvetica Neue", 10))
         self.status_lbl.grid(row=0, column=0, sticky="w")
-        self.dl_btn = ttk.Button(status_row, text="⬇  DOWNLOAD ALL",
-                                  style="Accent.TButton", command=self._start_download)
-        self.dl_btn.grid(row=0, column=1, padx=(12, 0))
 
-        log_card = Frame(bottom, bg=C["card"], padx=14, pady=10)
+        self.dl_btn_c = RoundedCanvas(sr, width=180, height=44, bg=T.bg, bd=0)
+        self.dl_btn_c.grid(row=0, column=1)
+        self.dl_btn_c.rrect(0, 0, 180, 44, r=T.radius, fill=T.accent, tags="bg")
+        self.dl_btn_c.create_text(90, 22, text="⬇  Download All", fill=T.text_inv,
+                                   font=("Helvetica Neue", 12, "bold"), tags="txt")
+        self.dl_btn_c.bind("<Button-1>", lambda e: self._start_download())
+        self.dl_btn_c.bind("<Enter>", lambda e: self._btn_over())
+        self.dl_btn_c.bind("<Leave>", lambda e: self._btn_out())
+
+        # Log
+        log_card = Frame(sec, bg=T.card, padx=14, pady=10)
         log_card.grid(row=2, column=0, columnspan=3, sticky="ew")
         log_card.columnconfigure(0, weight=1)
 
-        Label(log_card, text="Log", fg=C["text_dim"], bg=C["card"],
-              font=(FONT, 8, "bold")).grid(row=0, column=0, sticky="w", pady=(0, 4))
+        Label(log_card, text="Activity", fg=T.text_dim, bg=T.card,
+              font=("Helvetica Neue", 8, "bold")).grid(
+                  row=0, column=0, sticky="w", pady=(0, 6))
 
-        log_c = Frame(log_card, bg=C["list_bg"],
-                      highlightbackground=C["border"], highlightthickness=1)
-        log_c.grid(row=1, column=0, sticky="ew")
-        log_c.columnconfigure(0, weight=1)
+        lc = Frame(log_card, bg=T.bg,
+                   highlightbackground=T.border, highlightthickness=1)
+        lc.grid(row=1, column=0, sticky="ew")
+        lc.columnconfigure(0, weight=1)
 
-        self.log_text = Text(log_c,
-            bg=C["list_bg"], fg=C["log_text"],
-            font=((FONT_MONO if FONT_MONO else FONT), 10),
+        self.log_text = Text(lc,
+            bg=T.bg, fg=T.text_muted,
+            font=("SF Mono", 9),
             borderwidth=0, highlightthickness=0, state="disabled",
-            wrap="word", height=5, padx=8, pady=6)
+            wrap="word", height=5, padx=10, pady=8)
         self.log_text.grid(row=0, column=0, sticky="ew")
 
-        log_sb = ttk.Scrollbar(log_c, orient="vertical",
-                                style="Dark.Vertical.TScrollbar",
-                                command=self.log_text.yview)
-        log_sb.grid(row=0, column=1, sticky="ns")
-        self.log_text.config(yscrollcommand=log_sb.set)
+        lsb = Scrollbar(lc, orient="vertical", bg=T.scroll_track,
+                         troughcolor=T.scroll_track,
+                         activebackground=T.accent, bd=0, highlightthickness=0)
+        lsb.grid(row=0, column=1, sticky="ns")
+        self.log_text.config(yscrollcommand=lsb.set)
+        lsb.config(command=self.log_text.yview)
 
-    # ── Title Bar Drag ──
-    def _start_drag(self, e):
-        self._drag_data["x"] = e.x
-        self._drag_data["y"] = e.y
+    # ─── Helpers ──────────────────────────────────────────
+    def _mk_small_btn(self, parent, text, cmd):
+        c = RoundedCanvas(parent, width=72, height=28, bg=T.bg, bd=0)
+        c.rrect(0, 0, 72, 28, r=T.radius_sm, fill=T.card, tags="bg")
+        c.create_text(36, 14, text=text, fill=T.text_dim,
+                      font=("Helvetica Neue", 9), tags="txt")
+        c.bind("<Button-1>", lambda e: cmd())
+        c.bind("<Enter>", lambda e: c.itemconfig("bg", fill=T.card_hover))
+        c.bind("<Leave>", lambda e: c.itemconfig("bg", fill=T.card))
+        self._mk_small_btn = c
+        return c
 
-    def _drag(self, e):
-        x = self.root.winfo_x() + e.x - self._drag_data["x"]
-        y = self.root.winfo_y() + e.y - self._drag_data["y"]
+    def _show_count(self, n):
+        txt = str(n) if n else ""
+        self.count_lbl_tb.config(text=txt)
+        if n:
+            self.count_badge.pack(side=RIGHT, padx=(0, 16))
+        else:
+            self.count_badge.pack_forget()
+
+    # ─── Drag ─────────────────────────────────────────────
+    def _drag_start(self, e):
+        self._drag["x"] = e.x; self._drag["y"] = e.y
+
+    def _drag_move(self, e):
+        x = self.root.winfo_x() + e.x - self._drag["x"]
+        y = self.root.winfo_y() + e.y - self._drag["y"]
         self.root.geometry(f"+{x}+{y}")
 
-    def _close(self):
-        self.root.destroy()
-
-    def _minimize(self):
-        self.root.iconify()
-
+    def _close(self): self.root.destroy()
+    def _minimize(self): self.root.iconify()
     def _maximize(self):
         self.root.attributes("-fullscreen", not self.root.attributes("-fullscreen"))
 
-    # ── Entry Handlers ──
-    def _on_focus_in(self, e):
-        if self.url_var.get() == "https://youtube.com/watch?v=...":
+    # ─── Input ────────────────────────────────────────────
+    def _in_focus(self, e):
+        if self.url_var.get() == "Paste a YouTube link...":
             self.url_var.set("")
-            self.url_entry.config(foreground=C["text"])
+            self.url_entry.config(fg=T.text)
 
-    def _on_focus_out(self, e):
+    def _in_blur(self, e):
         if not self.url_var.get():
-            self.url_entry.insert(0, "https://youtube.com/watch?v=...")
-            self.url_entry.config(foreground=C["text_dim"])
+            self.url_entry.insert(0, "Paste a YouTube link...")
+            self.url_entry.config(fg=T.text_dim)
 
-    # ── URL Management ──
-    def _is_valid_url(self, u):
+    def _is_url(self, u):
         return "youtube.com" in u or "youtu.be" in u
 
     def _add_url(self):
         url = self.url_var.get().strip()
-        if not url or url == "https://youtube.com/watch?v=...":
+        if not url or url == "Paste a YouTube link...":
             return
-        if not self._is_valid_url(url):
-            self._log("Not a valid YouTube URL", C["error"])
+        if not self._is_url(url):
+            self._log("Not a valid YouTube URL", T.error)
             self.url_var.set("")
             return
         if url in self.urls:
-            self._log("URL already in list", C["error"])
+            self._log("Already in queue", T.warn)
             self.url_var.set("")
             return
         self.urls.append(url)
-        display = url if len(url) < 65 else url[:62] + "..."
-        self.listbox.insert(END, "  " + display)
-        self._update_count()
+        display = url if len(url) < 60 else url[:57] + "..."
+        self.listbox.insert(END, f"  {display}")
+        self._show_count(len(self.urls))
         self.url_var.set("")
-        self._log(f"Added: {url}", C["success"])
+        self._log("Added to queue", T.accent)
 
     def _remove_selected(self):
         sel = self.listbox.curselection()
-        if not sel:
-            return
-        for i in reversed(sel):
-            self.listbox.delete(i)
-            del self.urls[i]
-        self._update_count()
+        if not sel: return
+        for i in reversed(sel): self.listbox.delete(i); del self.urls[i]
+        self._show_count(len(self.urls))
 
     def _clear_urls(self):
-        self.listbox.delete(0, END)
-        self.urls.clear()
-        self._update_count()
-        self._log("Cleared all URLs", C["text_dim"])
+        self.listbox.delete(0, END); self.urls.clear()
+        self._show_count(0); self._log("Queue cleared", T.text_muted)
 
-    def _update_count(self):
-        n = len(self.urls)
-        self.count_lbl.config(text=f"{n} URL{'s' if n != 1 else ''} added" if n else "No URLs added")
-
-    # ── Logging ──
-    def _log(self, msg, color=C["log_text"]):
+    # ─── Log ──────────────────────────────────────────────
+    def _log(self, msg, color=T.text_muted):
         self.log_q.put((msg, color))
 
-    def _write_log(self, msg, color):
-        self.log_text.config(state="normal")
-        tag = f"tag_{id(msg)}"
-        self.log_text.tag_configure(tag, foreground=color)
-        self.log_text.insert(END, "  " + msg + "\n", tag)
-        self.log_text.see(END)
-        self.log_text.config(state="disabled")
-
-    def _poll_queues(self):
+    def _poll(self):
         try:
             while True:
                 m, c = self.log_q.get_nowait()
-                self._write_log(m, c)
+                self.log_text.config(state="normal")
+                self.log_text.insert(END, "  " + m + "\n")
+                self.log_text.see(END)
+                self.log_text.config(state="disabled")
         except queue.Empty:
             pass
         try:
@@ -354,41 +429,60 @@ class Ytmp4Converter:
                 self.status_lbl.config(text=s)
         except queue.Empty:
             pass
-        self.root.after(100, self._poll_queues)
+        self.root.after(100, self._poll)
 
-    # ── Download Logic ──
+    # ─── Button ──────────────────────────────────────────
+    def _btn_over(self):
+        self.dl_btn_c.itemconfig("bg", fill=T.accent_dim)
+
+    def _btn_out(self):
+        if not self.downloading:
+            self.dl_btn_c.itemconfig("bg", fill=T.accent)
+
+    # ─── Download ─────────────────────────────────────────
     def _start_download(self):
         if not self.urls:
             messagebox.showwarning("", "Add at least one YouTube URL first.")
             return
-        if self.downloading:
-            return
+        if self.downloading: return
         self.downloading = True
-        self.dl_btn.config(text="⬇  DOWNLOADING...", state="disabled")
-        self.progress.grid()
-        self.progress.start(10)
-        self._log("─" * 32, C["accent"])
-        self._log("Starting downloads", C["accent"])
+        self.dl_btn_c.itemconfig("bg", fill=T.text_muted)
+        self.dl_btn_c.itemconfig("txt", text="⬇  Downloading...")
+        self.prog_c.itemconfig("track", state="normal")
+        self.prog_c.itemconfig("bar", state="normal")
+        self.prog_width = self.prog_c.winfo_width() or 700
+        self._anim_progress(0)
+        self._log("▸ Starting downloads", T.accent)
         self.status_lbl.config(text="Downloading...")
-        threading.Thread(target=self._download_all, daemon=True).start()
+        threading.Thread(target=self._dl_all, daemon=True).start()
 
-    def _download_all(self):
+    def _anim_progress(self, pct):
+        if not self.downloading:
+            return
+        w = self.prog_c.winfo_width() or 700
+        bar_w = int(w * min(pct, 1.0))
+        self.prog_c.coords("bar", 0, 0, bar_w, 4)
+        self.root.after(50, lambda: self._anim_progress(pct))
+
+    def _dl_all(self):
         downloaded = []
         cwd = os.getcwd()
         os.chdir(DESKTOP)
         try:
-            for i, url in enumerate(self.urls, 1):
-                self.status_q.put(f"[{i}/{len(self.urls)}] Downloading...")
-                self.log_q.put((f"[{i}/{len(self.urls)}] {url}", "#ffffff"))
+            total = len(self.urls)
+            for i, url in enumerate(self.urls):
+                self.status_q.put(f"[{i+1}/{total}] Downloading...")
+                self.log_q.put((f"[{i+1}/{total}]", "#ffffff"))
                 fname = self._dl_one(url)
                 if fname:
                     downloaded.append(fname)
-                    self.log_q.put((f"  ✓  {fname}", C["success"]))
+                    self.log_q.put((f"  ✓ {fname}", T.success))
                 else:
-                    self.log_q.put(("  ✗  Failed", C["error"]))
+                    self.log_q.put(("  ✗ Failed", T.error))
+                self._anim_progress((i + 1) / total)
 
             if not downloaded:
-                self.log_q.put(("No files downloaded.", C["error"]))
+                self.log_q.put(("No files downloaded.", T.error))
                 self.status_q.put("Failed")
                 return
 
@@ -396,18 +490,15 @@ class Ytmp4Converter:
                 fn = "YouTube Downloads"
                 c = 1
                 while os.path.exists(os.path.join(DESKTOP, fn)):
-                    c += 1
-                    fn = f"YouTube Downloads {c}"
+                    c += 1; fn = f"YouTube Downloads {c}"
                 fp = os.path.join(DESKTOP, fn)
                 os.makedirs(fp, exist_ok=True)
                 for f in downloaded:
                     shutil.move(os.path.join(DESKTOP, f), os.path.join(fp, f))
-                self.log_q.put((f"─" * 32, C["accent"]))
-                self.log_q.put((f"Moved {len(downloaded)} files -> ~/Desktop/{fn}/", C["accent"]))
+                self.log_q.put((f"Moved to ~/Desktop/{fn}/", T.accent))
                 self.status_q.put(f"Done — {fn}")
             else:
-                self.log_q.put((f"─" * 32, C["accent"]))
-                self.log_q.put(("Saved to Desktop", C["accent"]))
+                self.log_q.put(("Saved to Desktop ✓", T.accent))
                 self.status_q.put("Done ✓")
         finally:
             os.chdir(cwd)
@@ -437,24 +528,22 @@ class Ytmp4Converter:
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
             output = result.stdout + result.stderr
             if result.returncode != 0 and "has already been" not in output:
-                err_line = [l for l in output.strip().split("\n") if l][-1]
-                self.log_q.put((f"  Error: {err_line}", C["error"]))
+                err = output.strip().split("\n")[-1] if output.strip() else "?"
+                self.log_q.put((f"  Error: {err}", T.error))
                 return None
 
             filename = None
             for line in output.split("\n"):
-                if "[Merger]" in line and "Merging formats into" in line:
+                if "[Merger]" in line and "into" in line:
                     for p in line.split('"'):
                         p = p.strip()
                         if p.endswith(".mp4") and os.path.exists(p):
-                            filename = p
-                            break
+                            filename = p; break
                     if not filename:
                         raw = line.split("into ")[-1].strip().strip("'\"")
                         if raw.endswith(".mp4") and os.path.exists(raw):
                             filename = raw
-                if filename:
-                    break
+                if filename: break
 
             if not filename and predicted and os.path.exists(predicted):
                 filename = predicted
@@ -463,25 +552,25 @@ class Ytmp4Converter:
                         if f.endswith(".mp4") and os.path.isfile(os.path.join(DESKTOP, f))]
                 if mp4s:
                     filename = max(mp4s, key=lambda f: os.path.getctime(os.path.join(DESKTOP, f)))
-            if filename and os.path.exists(filename):
+            if filename and os.path.exists(filename if filename.startswith("/") else os.path.join(DESKTOP, filename)):
                 return os.path.basename(filename)
             return None
         except subprocess.TimeoutExpired:
-            self.log_q.put(("  Timed out (10 min)", C["error"]))
+            self.log_q.put(("  Timed out (10 min)", T.error))
             return None
         except Exception as e:
-            self.log_q.put((f"  Exception: {e}", C["error"]))
+            self.log_q.put((f"  Error: {e}", T.error))
             return None
 
     def _finish(self):
         self.downloading = False
-        self.progress.stop()
-        self.progress.grid_remove()
-        self.progress_var.set(0)
-        self.dl_btn.config(text="⬇  DOWNLOAD ALL", state="normal")
+        self.dl_btn_c.itemconfig("bg", fill=T.accent)
+        self.dl_btn_c.itemconfig("txt", text="⬇  Download All")
+        self.prog_c.itemconfig("track", state="hidden")
+        self.prog_c.itemconfig("bar", state="hidden")
 
 
 if __name__ == "__main__":
     root = Tk()
-    app = Ytmp4Converter(root)
+    Ytmp4Converter(root)
     root.mainloop()
